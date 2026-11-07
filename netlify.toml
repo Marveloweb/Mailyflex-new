@@ -4,6 +4,9 @@
 
 [build.environment]
   NODE_VERSION = "22"
+  # Public by design: both values are shipped to every browser. Data is protected by row-level security.
+  VITE_SUPABASE_URL = "https://jxwjmisezpkbzbjjbjde.supabase.co"
+  VITE_SUPABASE_ANON_KEY = "sb_publishable_Fq-c_PuDwaycHYapqZRDbA_uIau0gNE"
 
 [[redirects]]
   from = "/*"
