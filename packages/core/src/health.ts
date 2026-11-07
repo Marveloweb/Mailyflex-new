@@ -1,0 +1,322 @@
+/**
+ * Full domain scan → 0–100 health score + plain-English fix list.
+ */
+import { CachingResolver, normalizeDomain, type Resolver } from './dns.ts';
+import { analyzeSpf, type SpfAnalysis } from './spf.ts';
+import { analyzeDkim, type DkimAnalysis } from './dkim.ts';
+import { analyzeDmarc, buildDmarc, type DmarcAnalysis } from './dmarc.ts';
+import { analyzeBimi, analyzeMtaSts, analyzeMx, analyzeTlsRpt, type BimiAnalysis, type MtaStsAnalysis, type MxAnalysis, type PolicyFetcher, type TlsRptAnalysis } from './transport.ts';
+import { analyzeBlacklists, type BlacklistAnalysis } from './blacklist.ts';
+
+export type Severity = 'critical' | 'warning' | 'info';
+export type Area = 'dmarc' | 'spf' | 'dkim' | 'mx' | 'mta-sts' | 'tls-rpt' | 'bimi' | 'blacklist';
+
+export interface FixRecord {
+  type: 'TXT' | 'CNAME' | 'MX';
+  host: string;
+  value: string;
+}
+
+export interface Fix {
+  id: string;
+  severity: Severity;
+  area: Area;
+  title: string;
+  detail: string;
+  record?: FixRecord;
+}
+
+export interface AreaScore {
+  score: number;
+  max: number;
+}
+
+export interface ScanResult {
+  domain: string;
+  scannedAt: string;
+  score: number;
+  grade: 'A' | 'B' | 'C' | 'D' | 'F';
+  breakdown: Record<Area, AreaScore>;
+  spf: SpfAnalysis;
+  dkim: DkimAnalysis;
+  dmarc: DmarcAnalysis;
+  mx: MxAnalysis;
+  mtaSts: MtaStsAnalysis;
+  tlsRpt: TlsRptAnalysis;
+  bimi: BimiAnalysis;
+  blacklist: BlacklistAnalysis | null;
+  fixes: Fix[];
+  /** Raw record snapshot used to detect DNS changes between scans. */
+  records: Record<string, string[]>;
+  dnsQueries: number;
+}
+
+export interface ScanOptions {
+  resolver: Resolver;
+  policyFetcher?: PolicyFetcher | null;
+  dkimSelectors?: string[];
+  blacklists?: boolean;
+  /** Address to suggest in DMARC fixes (e.g. the customer's Maily Flex report address). */
+  ruaAddress?: string;
+  now?: Date;
+}
+
+const SEVERITY_ORDER: Record<Severity, number> = { critical: 0, warning: 1, info: 2 };
+
+export function gradeFor(score: number): ScanResult['grade'] {
+  return score >= 90 ? 'A' : score >= 75 ? 'B' : score >= 60 ? 'C' : score >= 40 ? 'D' : 'F';
+}
+
+export function suggestedSpf(domain: string, mx: MxAnalysis): string {
+  if (mx.provider === 'Google Workspace') return 'v=spf1 include:_spf.google.com ~all';
+  if (mx.provider === 'Microsoft 365') return 'v=spf1 include:spf.protection.outlook.com -all';
+  if (mx.provider === 'Zoho Mail') return 'v=spf1 include:zohomail.com ~all';
+  if (mx.provider === 'Proton Mail') return 'v=spf1 include:_spf.protonmail.ch ~all';
+  if (mx.provider === 'Fastmail') return 'v=spf1 include:spf.messagingengine.com ~all';
+  if (mx.status === 'null-mx' || mx.status === 'missing') return 'v=spf1 -all';
+  void domain;
+  return 'v=spf1 mx ~all';
+}
+
+export function computeBreakdown(r: Omit<ScanResult, 'score' | 'grade' | 'breakdown' | 'fixes' | 'records' | 'scannedAt' | 'dnsQueries'>): { breakdown: Record<Area, AreaScore>; score: number } {
+  const b: Record<Area, AreaScore> = {
+    dmarc: { score: 0, max: 35 },
+    spf: { score: 0, max: 25 },
+    dkim: { score: 0, max: 20 },
+    mx: { score: 0, max: 5 },
+    'mta-sts': { score: 0, max: 7 },
+    'tls-rpt': { score: 0, max: 3 },
+    bimi: { score: 0, max: 5 },
+    blacklist: { score: 0, max: 0 },
+  };
+  // DMARC
+  const d = r.dmarc;
+  if (d.status === 'ok' || d.status === 'invalid' || d.status === 'multiple') {
+    if (d.status !== 'ok') b.dmarc.score = 5;
+    else {
+      const pol = d.effectivePolicy === 'reject' ? 30 : d.effectivePolicy === 'quarantine' ? 22 : 10;
+      const rua = (d.parsed?.record.rua.length ?? 0) > 0 ? 5 : 0;
+      const historic = d.parsed && (d.parsed.record.pct !== undefined || d.parsed.record.rf !== undefined || d.parsed.record.ri !== undefined) ? 2 : 0;
+      b.dmarc.score = Math.max(0, pol + rua - historic);
+    }
+  }
+  // SPF
+  const s = r.spf;
+  if (s.status === 'ok') {
+    const allPts = s.allQualifier === '-' ? 10 : s.allQualifier === '~' ? 9 : 3;
+    b.spf.score = 15 + allPts;
+    if (s.lookupCount > 8) b.spf.score -= 2; // close to the limit
+  } else if (s.status === 'invalid' || s.status === 'multiple') {
+    b.spf.score = s.lookupCount > 10 ? 5 : 8;
+  }
+  // DKIM
+  const k = r.dkim;
+  const keys = k.selectors.filter((x) => !x.parsed.revoked && x.parsed.valid);
+  if (keys.length) {
+    const minBits = Math.min(...keys.map((x) => x.parsed.keyBits ?? 0));
+    b.dkim.score = minBits >= 2048 || keys.every((x) => x.parsed.keyType === 'ed25519') ? 20 : 16;
+  } else if (k.selectors.length) b.dkim.score = 6;
+  // MX
+  const noInbound = r.mx.status === 'null-mx';
+  b.mx.score = r.mx.status === 'ok' || noInbound ? 5 : r.mx.status === 'missing' ? 3 : 1;
+  // MTA-STS / TLS-RPT (not applicable without inbound mail)
+  if (noInbound || r.mx.status === 'missing') {
+    b['mta-sts'].score = b['mta-sts'].max;
+    b['tls-rpt'].score = b['tls-rpt'].max;
+  } else {
+    if (r.mtaSts.status === 'ok') {
+      const mode = r.mtaSts.policy?.mode;
+      b['mta-sts'].score = mode === 'enforce' ? 7 : mode === 'testing' ? 5 : mode === 'none' ? 2 : 4;
+    } else if (r.mtaSts.status === 'invalid') b['mta-sts'].score = 1;
+    if (r.tlsRpt.status === 'ok') b['tls-rpt'].score = 3;
+  }
+  // BIMI only counts once DMARC is enforcing
+  const enforcing = d.status === 'ok' && (d.effectivePolicy === 'quarantine' || d.effectivePolicy === 'reject');
+  if (!enforcing) b.bimi.max = 0;
+  else if (r.bimi.status === 'ok') b.bimi.score = 5;
+  // Blacklists
+  let penalty = 0;
+  for (const l of r.blacklist?.listed ?? []) penalty += l.target.includes('.') && !/^\d/.test(l.target) ? 10 : 5;
+  penalty = Math.min(20, penalty);
+  b.blacklist.score = -penalty;
+
+  const max = Object.values(b).reduce((a, x) => a + x.max, 0);
+  const raw = Object.values(b).reduce((a, x) => a + x.score, 0);
+  const score = Math.max(0, Math.min(100, Math.round(((raw + penalty) / max) * 100) - penalty));
+  return { breakdown: b, score };
+}
+
+export function buildFixes(r: Omit<ScanResult, 'score' | 'grade' | 'breakdown' | 'fixes' | 'records' | 'scannedAt' | 'dnsQueries'>, ruaAddress?: string): Fix[] {
+  const fixes: Fix[] = [];
+  const domain = r.domain;
+  const rua = ruaAddress ?? `dmarc-reports@${domain}`;
+  const add = (f: Fix) => fixes.push(f);
+
+  // DMARC
+  const d = r.dmarc;
+  if (d.status === 'missing') {
+    add({
+      id: 'dmarc-missing', severity: 'critical', area: 'dmarc', title: 'Add a DMARC record',
+      detail: 'Without DMARC, anyone can send mail as your domain and Gmail, Yahoo and Outlook reject or junk bulk mail. Start with p=none to collect reports safely.',
+      record: { type: 'TXT', host: `_dmarc.${domain}`, value: buildDmarc({ p: 'none', rua: [rua] }) },
+    });
+  } else if (d.status === 'multiple') {
+    add({ id: 'dmarc-multiple', severity: 'critical', area: 'dmarc', title: 'Remove duplicate DMARC records', detail: `There are several TXT records at _dmarc.${d.foundAt}. Keep exactly one; receivers ignore DMARC when there are more.` });
+  } else if (d.status === 'invalid') {
+    add({ id: 'dmarc-invalid', severity: 'critical', area: 'dmarc', title: 'Fix your DMARC record', detail: d.errors.join(' ') });
+  } else if (d.status === 'ok') {
+    if (d.inherited) {
+      add({ id: 'dmarc-inherited', severity: 'info', area: 'dmarc', title: `DMARC is inherited from ${d.foundAt}`, detail: `This domain has no record of its own and uses the policy published at _dmarc.${d.foundAt}.` });
+    }
+    if (d.effectivePolicy === 'none') {
+      add({ id: 'dmarc-none', severity: 'warning', area: 'dmarc', title: 'Move DMARC beyond p=none', detail: 'Your policy only monitors; spoofed mail is still delivered. Use the enforcement wizard to step up to quarantine and then reject once reports show your real senders pass.' });
+    } else if (d.effectivePolicy === 'quarantine') {
+      add({ id: 'dmarc-quarantine', severity: 'info', area: 'dmarc', title: 'Finish the move to p=reject', detail: 'Quarantine sends spoofed mail to spam. p=reject blocks it outright and is required for the strongest protection.' });
+    }
+    if ((d.parsed?.record.rua.length ?? 0) === 0) {
+      add({
+        id: 'dmarc-no-rua', severity: 'warning', area: 'dmarc', title: 'Turn on DMARC reports',
+        detail: 'Add a rua address so mailbox providers send you daily reports of who is sending as your domain.',
+        record: { type: 'TXT', host: `_dmarc.${d.foundAt ?? domain}`, value: buildDmarc({ p: d.parsed?.record.p ?? 'none', rua: [rua] }) },
+      });
+    }
+    const historic = ['pct', 'rf', 'ri'].filter((t) => d.parsed?.record.tags[t] !== undefined);
+    if (historic.length) {
+      add({ id: 'dmarc-historic', severity: 'info', area: 'dmarc', title: `Remove outdated DMARC tags (${historic.join(', ')})`, detail: 'RFC 9989 (May 2026) retired these tags. Use t=y instead of pct for a test rollout.' });
+    }
+    for (const c of d.ruaChecks.filter((c) => c.authorized === false)) {
+      add({ id: `dmarc-rua-auth-${c.address}`, severity: 'warning', area: 'dmarc', title: `Reports to ${c.address} are not authorised`, detail: `The receiving domain must publish ${d.foundAt}._report._dmarc.${c.address.split('@')[1]} TXT "v=DMARC1", or reports will be dropped.` });
+    }
+  }
+
+  // SPF
+  const s = r.spf;
+  if (s.status === 'missing') {
+    add({ id: 'spf-missing', severity: 'critical', area: 'spf', title: 'Add an SPF record', detail: 'SPF lists the servers allowed to send mail for your domain. Add every service that sends for you.', record: { type: 'TXT', host: domain, value: suggestedSpf(domain, r.mx) } });
+  } else if (s.status === 'multiple') {
+    add({ id: 'spf-multiple', severity: 'critical', area: 'spf', title: 'Merge your SPF records into one', detail: 'Having more than one "v=spf1" record makes SPF fail for all of your mail.' });
+  } else if (s.status === 'error') {
+    add({ id: 'spf-error', severity: 'warning', area: 'spf', title: 'SPF could not be checked', detail: s.errors.join(' ') });
+  }
+  if (s.lookupCount > 10) {
+    add({ id: 'spf-lookups', severity: 'critical', area: 'spf', title: `SPF needs ${s.lookupCount} DNS lookups (limit is 10)`, detail: 'Receivers stop at 10 and fail SPF for all your mail. Remove unused services or switch on Maily Flex hosted SPF, which flattens the record automatically.' });
+  } else if (s.lookupCount > 8) {
+    add({ id: 'spf-lookups-near', severity: 'info', area: 'spf', title: `SPF uses ${s.lookupCount} of 10 lookups`, detail: 'Adding one or two more services will break SPF. Hosted SPF keeps you under the limit.' });
+  }
+  if (s.status === 'invalid' && s.lookupCount <= 10) {
+    add({ id: 'spf-invalid', severity: 'critical', area: 'spf', title: 'Fix your SPF record', detail: s.errors.join(' ') });
+  }
+  if (s.allQualifier === '+') {
+    add({ id: 'spf-plus-all', severity: 'critical', area: 'spf', title: 'Remove "+all" from SPF', detail: '"+all" authorises every server on the internet to send as you.' });
+  } else if (s.status === 'ok' && (s.allQualifier === '?' || !s.allQualifier)) {
+    add({ id: 'spf-weak-all', severity: 'warning', area: 'spf', title: 'End SPF with "~all" or "-all"', detail: 'Your record does not tell receivers to distrust unlisted servers.' });
+  }
+
+  // DKIM
+  const k = r.dkim;
+  if (k.status === 'missing') {
+    add({ id: 'dkim-missing', severity: 'critical', area: 'dkim', title: 'Set up DKIM signing', detail: 'No DKIM key was found on common selectors. Turn on DKIM in each service that sends for you (Google Workspace, Microsoft 365, your newsletter tool) and publish the key it gives you. If you use a custom selector, add it in settings.' });
+  } else {
+    for (const sel of k.selectors) {
+      if (sel.parsed.keyBits !== null && sel.parsed.keyBits < 1024) add({ id: `dkim-weak-${sel.selector}`, severity: 'critical', area: 'dkim', title: `DKIM key "${sel.selector}" is too short`, detail: `${sel.parsed.keyBits}-bit keys are rejected by Gmail. Generate a 2048-bit key.` });
+      else if (sel.parsed.keyBits !== null && sel.parsed.keyBits < 2048 && sel.parsed.keyType === 'rsa') add({ id: `dkim-1024-${sel.selector}`, severity: 'info', area: 'dkim', title: `Upgrade DKIM key "${sel.selector}" to 2048 bits`, detail: '1024-bit keys still work but 2048 bits is the current recommendation.' });
+      if (sel.parsed.testing) add({ id: `dkim-testing-${sel.selector}`, severity: 'warning', area: 'dkim', title: `DKIM key "${sel.selector}" is in test mode`, detail: 'Remove t=y from the key record when you have finished testing.' });
+      if (!sel.parsed.valid) add({ id: `dkim-invalid-${sel.selector}`, severity: 'critical', area: 'dkim', title: `DKIM key "${sel.selector}" is broken`, detail: sel.parsed.errors.join(' ') });
+    }
+  }
+
+  // MX
+  if (r.mx.status === 'invalid') add({ id: 'mx-invalid', severity: 'warning', area: 'mx', title: 'Fix your MX records', detail: r.mx.errors.join(' ') });
+  if (r.mx.status === 'missing' && r.mx.errors.length === 0) {
+    add({ id: 'mx-missing', severity: 'info', area: 'mx', title: 'No MX record', detail: 'If this domain should never receive email, publish a null MX ("0 .") so senders stop trying.', record: { type: 'MX', host: domain, value: '0 .' } });
+  }
+
+  // MTA-STS / TLS-RPT (only meaningful for domains that receive mail)
+  if (r.mx.status === 'ok') {
+    if (r.mtaSts.status === 'missing') {
+      add({ id: 'mta-sts-missing', severity: 'info', area: 'mta-sts', title: 'Protect incoming mail with MTA-STS', detail: 'MTA-STS tells other servers to only deliver to you over verified TLS. Maily Flex can host the policy for you with two CNAME records.' });
+    } else if (r.mtaSts.status === 'invalid') {
+      add({ id: 'mta-sts-invalid', severity: 'warning', area: 'mta-sts', title: 'Fix your MTA-STS setup', detail: r.mtaSts.errors.join(' ') });
+    } else if (r.mtaSts.policy?.mode === 'testing') {
+      add({ id: 'mta-sts-testing', severity: 'info', area: 'mta-sts', title: 'Switch MTA-STS to enforce', detail: 'Testing mode only reports problems. Switch to enforce once TLS reports are clean.' });
+    }
+    if (r.tlsRpt.status === 'missing') {
+      add({ id: 'tls-rpt-missing', severity: 'info', area: 'tls-rpt', title: 'Add a TLS-RPT record', detail: 'Get daily reports of TLS delivery failures to your domain.', record: { type: 'TXT', host: `_smtp._tls.${domain}`, value: `v=TLSRPTv1; rua=mailto:tls-reports@${domain}` } });
+    } else if (r.tlsRpt.status === 'invalid') {
+      add({ id: 'tls-rpt-invalid', severity: 'warning', area: 'tls-rpt', title: 'Fix your TLS-RPT record', detail: r.tlsRpt.errors.join(' ') });
+    }
+  }
+
+  // BIMI
+  if (r.bimi.status === 'invalid') add({ id: 'bimi-invalid', severity: 'warning', area: 'bimi', title: 'Fix your BIMI record', detail: r.bimi.errors.join(' ') });
+  else if (r.bimi.status === 'missing' && d.status === 'ok' && (d.effectivePolicy === 'quarantine' || d.effectivePolicy === 'reject')) {
+    add({ id: 'bimi-missing', severity: 'info', area: 'bimi', title: 'Show your logo in inboxes with BIMI', detail: 'Your DMARC policy is enforced, so you can publish a BIMI record with an SVG logo (and a VMC/CMC for Gmail and Apple Mail).' });
+  }
+
+  // Blacklists
+  for (const l of r.blacklist?.listed ?? []) {
+    add({ id: `bl-${l.zone}-${l.target}`, severity: 'critical', area: 'blacklist', title: `${l.target} is listed on ${l.name}`, detail: `Mail from this ${/^\d/.test(l.target) ? 'IP' : 'domain'} may be blocked. Fix the cause (compromised account, spam complaints), then request removal at ${l.delistUrl}.` });
+  }
+
+  return fixes.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
+}
+
+export function snapshotRecords(r: Pick<ScanResult, 'spf' | 'dmarc' | 'dkim' | 'mx' | 'mtaSts' | 'tlsRpt' | 'bimi'>): Record<string, string[]> {
+  const snap: Record<string, string[]> = {
+    spf: [...r.spf.records].sort(),
+    dmarc: r.dmarc.record ? [r.dmarc.record] : [],
+    mx: r.mx.hosts.map((h) => `${h.priority} ${h.host}`).sort(),
+    'mta-sts': r.mtaSts.txt ? [r.mtaSts.txt] : [],
+    'mta-sts-policy': r.mtaSts.policyText ? [r.mtaSts.policyText.trim()] : [],
+    'tls-rpt': r.tlsRpt.record ? [r.tlsRpt.record] : [],
+    bimi: r.bimi.record ? [r.bimi.record] : [],
+  };
+  for (const s of r.dkim.selectors) snap[`dkim:${s.selector}`] = [s.record];
+  return snap;
+}
+
+export interface RecordChange {
+  key: string;
+  before: string[];
+  after: string[];
+}
+
+export function diffSnapshots(before: Record<string, string[]>, after: Record<string, string[]>): RecordChange[] {
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  const changes: RecordChange[] = [];
+  for (const key of keys) {
+    const a = before[key] ?? [];
+    const b = after[key] ?? [];
+    if (a.length !== b.length || a.some((v, i) => v !== b[i])) changes.push({ key, before: a, after: b });
+  }
+  return changes.sort((x, y) => x.key.localeCompare(y.key));
+}
+
+export async function scanDomain(input: string, opts: ScanOptions): Promise<ScanResult> {
+  const domain = normalizeDomain(input);
+  const resolver = new CachingResolver(opts.resolver);
+  const [spf, dkim, dmarc, mx, tlsRpt] = await Promise.all([
+    analyzeSpf(domain, resolver),
+    analyzeDkim(domain, resolver, opts.dkimSelectors ?? []),
+    analyzeDmarc(domain, resolver),
+    analyzeMx(domain, resolver),
+    analyzeTlsRpt(domain, resolver),
+  ]);
+  const [mtaSts, bimi, blacklist] = await Promise.all([
+    analyzeMtaSts(domain, resolver, opts.policyFetcher ?? null, mx.hosts.map((h) => h.host)),
+    analyzeBimi(domain, resolver, dmarc),
+    opts.blacklists === false ? Promise.resolve(null) : analyzeBlacklists(domain, mx.hosts.flatMap((h) => h.addresses), resolver),
+  ]);
+  const partial = { domain, spf, dkim, dmarc, mx, mtaSts, tlsRpt, bimi, blacklist };
+  const { breakdown, score } = computeBreakdown(partial);
+  return {
+    ...partial,
+    scannedAt: (opts.now ?? new Date()).toISOString(),
+    score,
+    grade: gradeFor(score),
+    breakdown,
+    fixes: buildFixes(partial, opts.ruaAddress),
+    records: snapshotRecords(partial),
+    dnsQueries: resolver.queries,
+  };
+}
