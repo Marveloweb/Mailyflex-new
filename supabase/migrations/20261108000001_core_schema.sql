@@ -373,9 +373,10 @@ grant select, update (role), delete on public.memberships to authenticated;
 grant select, delete on public.invites to authenticated;
 grant select, insert (org_id, name, dkim_selectors), update (dkim_selectors, hosted_dmarc, hosted_spf, hosted_mta_sts), delete on public.domains to authenticated;
 grant select on public.domain_scans, public.dmarc_reports, public.dmarc_records, public.ip_intel to authenticated;
-grant select, insert (domain_id, p, sp, np, adkim, aspf, t, extra_rua, updated_by), update (p, sp, np, adkim, aspf, t, extra_rua, updated_by), delete on public.dmarc_policies to authenticated;
-grant select, insert (domain_id, includes, ip4, ip6, all_qualifier), update (includes, ip4, ip6, all_qualifier), delete on public.spf_configs to authenticated;
-grant select, insert (domain_id, mode, mx, max_age, tlsrpt_enabled), update (mode, mx, max_age, tlsrpt_enabled), delete on public.mta_sts_configs to authenticated;
+-- domain_id is updatable only so PostgREST upserts work; RLS re-checks admin rights on the target domain.
+grant select, insert (domain_id, p, sp, np, adkim, aspf, t, extra_rua, updated_by), update (domain_id, p, sp, np, adkim, aspf, t, extra_rua, updated_by), delete on public.dmarc_policies to authenticated;
+grant select, insert (domain_id, includes, ip4, ip6, all_qualifier), update (domain_id, includes, ip4, ip6, all_qualifier), delete on public.spf_configs to authenticated;
+grant select, insert (domain_id, mode, mx, max_age, tlsrpt_enabled), update (domain_id, mode, mx, max_age, tlsrpt_enabled), delete on public.mta_sts_configs to authenticated;
 grant select, update (read_at) on public.alerts to authenticated;
 grant select, update (weekly_digest, email_on_critical, pass_rate_threshold) on public.alert_settings to authenticated;
 

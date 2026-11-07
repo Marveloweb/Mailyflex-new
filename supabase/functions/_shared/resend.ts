@@ -1,6 +1,7 @@
 import { env } from './env.ts';
 
-const API = 'https://api.resend.com';
+// Overridable for local end-to-end tests; production uses the default.
+const API = (Deno.env.get('RESEND_API_BASE') ?? 'https://api.resend.com').replace(/\/$/, '');
 
 async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API}${path}`, {

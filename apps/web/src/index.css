@@ -1,0 +1,89 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/bricolage-grotesque';
+@import '@fontsource/ibm-plex-sans/400.css';
+@import '@fontsource/ibm-plex-sans/500.css';
+@import '@fontsource/ibm-plex-sans/600.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+
+@theme {
+  --color-paper: #f4f6fa;
+  --color-sheet: #ffffff;
+  --color-ink: #13213c;
+  --color-ink-soft: #4a5875;
+  --color-ink-faint: #8591a8;
+  --color-rule: #dde3ed;
+  --color-airmail-red: #c3343f;
+  --color-airmail-blue: #24479a;
+  --color-pass: #1d7348;
+  --color-pass-bg: #e6f2ec;
+  --color-warn: #a86a12;
+  --color-warn-bg: #fbf1e1;
+  --color-fail: #b42f39;
+  --color-fail-bg: #fbe9ea;
+
+  --font-display: 'Bricolage Grotesque Variable', 'IBM Plex Sans', system-ui, sans-serif;
+  --font-sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@layer base {
+  html {
+    background: var(--color-paper);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  h1, h2, h3 {
+    font-family: var(--font-display);
+    line-height: 1.12;
+    letter-spacing: -0.01em;
+    font-weight: 650;
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-airmail-blue);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  ::selection {
+    background: #d7e1f5;
+  }
+}
+
+/* The one bold device: an air-mail envelope border. */
+.airmail {
+  position: relative;
+  background: var(--color-sheet);
+  border-radius: 14px;
+  padding: 10px;
+  background-image: repeating-linear-gradient(
+    135deg,
+    var(--color-airmail-red) 0 14px,
+    var(--color-sheet) 14px 22px,
+    var(--color-airmail-blue) 22px 36px,
+    var(--color-sheet) 36px 44px
+  );
+}
+.airmail > .airmail-inner {
+  background: var(--color-sheet);
+  border-radius: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@keyframes stamp-in {
+  0% { transform: scale(1.35) rotate(-14deg); opacity: 0; }
+  60% { transform: scale(0.96) rotate(-7deg); opacity: 1; }
+  100% { transform: scale(1) rotate(-8deg); opacity: 1; }
+}
+.stamp-in {
+  animation: stamp-in 420ms cubic-bezier(.2,.8,.2,1) both;
+}

@@ -9,3 +9,4 @@ coverage
 supabase/.temp
 supabase/.branches
 *.log
+supabase/functions/.local-ca.crt

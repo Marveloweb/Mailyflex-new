@@ -76,8 +76,14 @@ select t.eq((select count(*) from public.profiles)::int, 2, 'carol sees alice + 
 -- admin cannot make herself owner or remove the owner
 select t.expect_error($$update public.memberships set role = 'owner' where user_id = '00000000-0000-0000-0000-00000000000c'$$, 'Only owners');
 select t.expect_error($$delete from public.memberships where user_id = '00000000-0000-0000-0000-00000000000a'$$, 'owner');
--- admin can edit hosted DMARC config
-insert into public.dmarc_policies (domain_id, p) select v::uuid, 'quarantine' from t.ctx where k = 'dom_a';
+-- admin can edit hosted DMARC config, including via upsert (what the web client sends)
+insert into public.dmarc_policies (domain_id, p) select v::uuid, 'none' from t.ctx where k = 'dom_a';
+insert into public.dmarc_policies (domain_id, p) select v::uuid, 'quarantine' from t.ctx where k = 'dom_a'
+  on conflict (domain_id) do update set domain_id = excluded.domain_id, p = excluded.p;
+insert into public.spf_configs (domain_id, includes) select v::uuid, '{_spf.google.com}' from t.ctx where k = 'dom_a'
+  on conflict (domain_id) do update set domain_id = excluded.domain_id, includes = excluded.includes;
+-- but cannot move a config onto a domain in another org
+select t.expect_error($$update public.spf_configs set domain_id = (select id from public.domains d where d.org_id = (select v::uuid from t.ctx where k = 'org_b'))$$, 'row-level security|violates');
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000d', false);
 select public.accept_invite((select v from t.ctx where k = 'invite_dave'));
 select t.eq((select count(*) from public.domains)::int, 1, 'viewer sees domain');

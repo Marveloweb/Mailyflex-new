@@ -57,7 +57,7 @@ begin
   where token_hash = encode(sha256(convert_to(p_token, 'UTF8')), 'hex')
   for update;
   if not found or v_inv.accepted_at is not null or v_inv.expires_at < now() then
-    raise exception 'This invite is invalid or has expired' using errcode = 'no_data_found';
+    raise exception 'This invite is invalid or has expired' using errcode = 'P0001';
   end if;
   if v_inv.email <> v_email then
     raise exception 'This invite was sent to a different email address' using errcode = 'insufficient_privilege';

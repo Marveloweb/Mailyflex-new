@@ -13,7 +13,11 @@
     "test": "npm run test --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",
     "sync-core": "node scripts/sync-core.mjs",
-    "check-core-sync": "node scripts/sync-core.mjs --check"
+    "check-core-sync": "node scripts/sync-core.mjs --check",
+    "test:db": "bash scripts/test-db.sh",
+    "test:functions": "cd supabase/functions && deno test --config deno.json --allow-net=none",
+    "check:functions": "cd supabase/functions && deno check --config deno.json */index.ts",
+    "dev": "npm run dev -w @mailyflex/web"
   },
   "engines": {
     "node": ">=20"

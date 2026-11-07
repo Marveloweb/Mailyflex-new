@@ -63,17 +63,19 @@ workers/mailyflex-edge/ Cloudflare Worker: MTA-STS policy hosting for custom hos
 
 ## 4. Hosted DNS design (Cloudflare zone `dns.mailyflex.com`)
 
+Records are keyed on each domain's random `report_token` (not the domain name), so names never collide between customers and never exceed DNS length limits.
+
 | Customer record | Points to | We publish |
 |---|---|---|
-| `_dmarc.example.com CNAME` | `example.com._d.dns.mailyflex.com` | TXT `v=DMARC1; p=…; rua=mailto:<token>@rua.mailyflex.com` |
-| `example.com TXT` | `v=spf1 include:example.com._s.dns.mailyflex.com -all` | flattened ip4/ip6 chain `…._s`, `…1._s`, `…2._s` (each ≤ 450 bytes, split into 255-byte strings) |
-| `_mta-sts.example.com CNAME` | `example.com._m.dns.mailyflex.com` | TXT `v=STSv1; id=<policy_id>` |
+| `_dmarc.example.com CNAME` | `<token>._d.dns.mailyflex.com` | TXT `v=DMARC1; p=…; rua=mailto:<token>@rua.mailyflex.com` |
+| `example.com TXT` | `v=spf1 include:<token>._s.dns.mailyflex.com ~all` | flattened ip4/ip6 chain `<token>._s`, `<token>-1._s`, … (each ≤ 450 bytes, split into 255-byte strings) |
+| `_mta-sts.example.com CNAME` | `<token>._m.dns.mailyflex.com` | TXT `v=STSv1; id=<policy_id>` |
 | `mta-sts.example.com CNAME` | `sts.dns.mailyflex.com` (fallback origin) | custom hostname + Worker serves policy |
-| `_smtp._tls.example.com CNAME` | `example.com._t.dns.mailyflex.com` | TXT `v=TLSRPTv1; rua=mailto:<token>@tls.mailyflex.com` |
+| `_smtp._tls.example.com CNAME` | `<token>._t.dns.mailyflex.com` | TXT `v=TLSRPTv1; rua=mailto:<token>@tls.mailyflex.com` |
 
 External report authorization: wildcard `*._report._dmarc.rua.mailyflex.com TXT "v=DMARC1"`, so receivers accept our RUA address for any customer domain.
 
-SPF flattening is macro-free (works with every receiver). Lookups that can't be flattened safely (`exists`, macros, `ptr`) are kept as-is and counted.
+SPF flattening is macro-free (works with every receiver). Terms that can't be flattened safely (`exists`, macros, `ptr`) are kept verbatim. If any include fails to resolve during a refresh, the last good flattening stays published. Records are only published for verified domains.
 
 ## 5. Health score (0–100)
 

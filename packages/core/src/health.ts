@@ -217,9 +217,19 @@ export function buildFixes(r: Omit<ScanResult, 'score' | 'grade' | 'breakdown' |
   if (k.status === 'missing') {
     add({ id: 'dkim-missing', severity: 'critical', area: 'dkim', title: 'Set up DKIM signing', detail: 'No DKIM key was found on common selectors. Turn on DKIM in each service that sends for you (Google Workspace, Microsoft 365, your newsletter tool) and publish the key it gives you. If you use a custom selector, add it in settings.' });
   } else {
+    const medium = k.selectors.filter((sel) => sel.parsed.keyType === 'rsa' && sel.parsed.keyBits !== null && sel.parsed.keyBits >= 1024 && sel.parsed.keyBits < 2048);
+    if (medium.length) {
+      const names = medium.map((m) => `"${m.selector}"`).join(', ');
+      add({
+        id: 'dkim-1024',
+        severity: 'info',
+        area: 'dkim',
+        title: medium.length === 1 ? `Upgrade DKIM key ${names} to 2048 bits` : `Upgrade ${medium.length} DKIM keys to 2048 bits`,
+        detail: `${medium.length === 1 ? 'This key is' : `Keys ${names} are`} 1024 bits. They still work, but 2048 bits is the current recommendation. Rotate them in the sending service's settings.`,
+      });
+    }
     for (const sel of k.selectors) {
       if (sel.parsed.keyBits !== null && sel.parsed.keyBits < 1024) add({ id: `dkim-weak-${sel.selector}`, severity: 'critical', area: 'dkim', title: `DKIM key "${sel.selector}" is too short`, detail: `${sel.parsed.keyBits}-bit keys are rejected by Gmail. Generate a 2048-bit key.` });
-      else if (sel.parsed.keyBits !== null && sel.parsed.keyBits < 2048 && sel.parsed.keyType === 'rsa') add({ id: `dkim-1024-${sel.selector}`, severity: 'info', area: 'dkim', title: `Upgrade DKIM key "${sel.selector}" to 2048 bits`, detail: '1024-bit keys still work but 2048 bits is the current recommendation.' });
       if (sel.parsed.testing) add({ id: `dkim-testing-${sel.selector}`, severity: 'warning', area: 'dkim', title: `DKIM key "${sel.selector}" is in test mode`, detail: 'Remove t=y from the key record when you have finished testing.' });
       if (!sel.parsed.valid) add({ id: `dkim-invalid-${sel.selector}`, severity: 'critical', area: 'dkim', title: `DKIM key "${sel.selector}" is broken`, detail: sel.parsed.errors.join(' ') });
     }
