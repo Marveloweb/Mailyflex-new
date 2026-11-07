@@ -1,0 +1,305 @@
+/**
+ * DMARC per RFC 9989 (DMARCbis, May 2026; replaces RFC 7489 and RFC 9091).
+ * - New tags: np, psd, t. Historic tags: pct, rf, ri (accepted, but flagged).
+ * - Policy discovery via DNS tree walk.
+ */
+import { resolveTxt, type Resolver } from './dns.ts';
+
+export type DmarcPolicy = 'none' | 'quarantine' | 'reject';
+export type Alignment = 'r' | 's';
+
+export interface DmarcRecord {
+  p?: DmarcPolicy;
+  sp?: DmarcPolicy;
+  np?: DmarcPolicy;
+  adkim: Alignment;
+  aspf: Alignment;
+  fo?: string;
+  rua: string[];
+  ruf: string[];
+  t?: 'y' | 'n';
+  psd?: 'y' | 'n' | 'u';
+  pct?: number;
+  rf?: string;
+  ri?: number;
+  tags: Record<string, string>;
+}
+
+export interface ParsedDmarc {
+  valid: boolean;
+  record: DmarcRecord;
+  errors: string[];
+  warnings: string[];
+}
+
+const POLICIES: DmarcPolicy[] = ['none', 'quarantine', 'reject'];
+const KNOWN_TAGS = new Set(['v', 'p', 'sp', 'np', 'adkim', 'aspf', 'fo', 'rua', 'ruf', 't', 'psd', 'pct', 'rf', 'ri']);
+
+export function isDmarcRecord(txt: string): boolean {
+  return /^v\s*=\s*DMARC1\s*(;|$)/i.test(txt.trim());
+}
+
+function parseUris(value: string, tag: string, errors: string[]): string[] {
+  const uris = value
+    .split(',')
+    .map((u) => u.trim())
+    .filter(Boolean)
+    // RFC 7489 allowed a "!size" suffix; RFC 9989 removed it. Strip for comparison.
+    .map((u) => u.replace(/!\d+[kmgt]?$/i, ''));
+  for (const u of uris) {
+    if (!/^mailto:[^@\s]+@[^@\s]+\.[^@\s]+$/i.test(u) && !/^https:\/\//i.test(u)) {
+      errors.push(`${tag} contains "${u}", which is not a valid mailto: address.`);
+    }
+  }
+  return uris;
+}
+
+export function parseDmarc(raw: string): ParsedDmarc {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const record: DmarcRecord = { adkim: 'r', aspf: 'r', rua: [], ruf: [], tags: {} };
+  const parts = raw
+    .split(';')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  parts.forEach((part, i) => {
+    const eq = part.indexOf('=');
+    if (eq < 1) {
+      errors.push(`Malformed tag "${part}".`);
+      return;
+    }
+    const tag = part.slice(0, eq).trim().toLowerCase();
+    const value = part.slice(eq + 1).trim();
+    if (record.tags[tag] !== undefined) warnings.push(`Tag "${tag}" appears more than once; only the first is used.`);
+    else record.tags[tag] = value;
+    if (i === 0 && (tag !== 'v' || value.toUpperCase() !== 'DMARC1')) errors.push('Record must start with "v=DMARC1".');
+    if (!KNOWN_TAGS.has(tag)) warnings.push(`Unknown tag "${tag}" is ignored by receivers.`);
+  });
+  const t = record.tags;
+  const policyTag = (name: 'p' | 'sp' | 'np') => {
+    const v = t[name]?.toLowerCase();
+    if (v === undefined) return undefined;
+    if (!POLICIES.includes(v as DmarcPolicy)) {
+      errors.push(`${name}=${t[name]} is invalid; use none, quarantine or reject.`);
+      return undefined;
+    }
+    return v as DmarcPolicy;
+  };
+  record.p = policyTag('p');
+  record.sp = policyTag('sp');
+  record.np = policyTag('np');
+  for (const a of ['adkim', 'aspf'] as const) {
+    const v = t[a]?.toLowerCase();
+    if (v === undefined) continue;
+    if (v !== 'r' && v !== 's') errors.push(`${a}=${t[a]} is invalid; use r (relaxed) or s (strict).`);
+    else record[a] = v;
+  }
+  if (t.fo !== undefined) {
+    if (!/^[01ds](:[01ds])*$/i.test(t.fo)) errors.push(`fo=${t.fo} is invalid; use 0, 1, d, s or a colon-separated mix.`);
+    else record.fo = t.fo;
+  }
+  if (t.rua !== undefined) record.rua = parseUris(t.rua, 'rua', errors);
+  if (t.ruf !== undefined) record.ruf = parseUris(t.ruf, 'ruf', errors);
+  if (t.t !== undefined) {
+    const v = t.t.toLowerCase();
+    if (v !== 'y' && v !== 'n') errors.push(`t=${t.t} is invalid; use y or n.`);
+    else record.t = v;
+  }
+  if (t.psd !== undefined) {
+    const v = t.psd.toLowerCase();
+    if (v !== 'y' && v !== 'n' && v !== 'u') errors.push(`psd=${t.psd} is invalid; use y, n or u.`);
+    else record.psd = v;
+  }
+  if (t.pct !== undefined) {
+    const n = Number(t.pct);
+    if (!/^\d{1,3}$/.test(t.pct) || n > 100) errors.push(`pct=${t.pct} is invalid; use 0–100.`);
+    else record.pct = n;
+    warnings.push('"pct" is historic under RFC 9989. Use t=y for testing instead (keep pct only alongside t=y for older receivers).');
+  }
+  if (t.rf !== undefined) {
+    record.rf = t.rf;
+    warnings.push('"rf" is historic under RFC 9989 and can be removed.');
+  }
+  if (t.ri !== undefined) {
+    record.ri = Number(t.ri);
+    warnings.push('"ri" is historic under RFC 9989; receivers send aggregate reports daily regardless.');
+  }
+  if (!record.p) {
+    if (record.rua.length) warnings.push('No "p" tag. Receivers treat this as p=none because a valid rua is present.');
+    else errors.push('Missing required "p" tag (none, quarantine or reject).');
+  }
+  return { valid: errors.length === 0, record, errors, warnings };
+}
+
+const MULTI_LABEL_SUFFIXES = new Set([
+  'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'me.uk', 'ltd.uk', 'plc.uk', 'net.uk',
+  'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au', 'co.nz', 'org.nz', 'net.nz',
+  'co.in', 'net.in', 'org.in', 'firm.in', 'gen.in', 'ind.in', 'ac.in', 'gov.in', 'edu.in',
+  'co.jp', 'ne.jp', 'or.jp', 'ac.jp', 'com.br', 'net.br', 'org.br', 'com.mx', 'org.mx',
+  'co.za', 'org.za', 'com.sg', 'edu.sg', 'com.cn', 'net.cn', 'org.cn', 'com.tr', 'com.hk',
+  'co.kr', 'or.kr', 'com.ar', 'com.co', 'com.my', 'com.ph', 'com.pk', 'com.ng', 'co.id',
+  'co.il', 'com.sa', 'com.eg', 'co.th', 'com.vn', 'com.tw', 'com.ua', 'co.ke',
+]);
+
+/** Best-effort organizational domain (used for display and RUA authorization checks). */
+export function orgDomain(domain: string): string {
+  const labels = domain.toLowerCase().split('.').filter(Boolean);
+  if (labels.length <= 2) return labels.join('.');
+  const lastTwo = labels.slice(-2).join('.');
+  return MULTI_LABEL_SUFFIXES.has(lastTwo) ? labels.slice(-3).join('.') : lastTwo;
+}
+
+export interface RuaCheck {
+  uri: string;
+  address: string;
+  external: boolean;
+  /** true/false when external authorization was checked; null when not needed or lookup failed. */
+  authorized: boolean | null;
+}
+
+export interface DmarcAnalysis {
+  domain: string;
+  status: 'ok' | 'missing' | 'multiple' | 'invalid' | 'error';
+  record?: string;
+  /** Domain whose _dmarc record applied (differs from `domain` when inherited via tree walk). */
+  foundAt?: string;
+  inherited: boolean;
+  parsed?: ParsedDmarc;
+  /** Published policy for this domain (sp/np when inherited for a subdomain). */
+  policy: DmarcPolicy | null;
+  /** Policy receivers actually apply, taking t=y into account. */
+  effectivePolicy: DmarcPolicy | null;
+  testing: boolean;
+  ruaChecks: RuaCheck[];
+  errors: string[];
+  warnings: string[];
+}
+
+function stepDown(p: DmarcPolicy): DmarcPolicy {
+  return p === 'reject' ? 'quarantine' : 'none';
+}
+
+/** RFC 9989 tree walk: query _dmarc.<domain>, then parents, at most 8 queries. */
+export async function findDmarcRecord(
+  domain: string,
+  resolver: Resolver,
+): Promise<{ status: 'found' | 'missing' | 'error' | 'multiple'; records: string[]; foundAt?: string; error?: string }> {
+  let labels = domain.toLowerCase().split('.').filter(Boolean);
+  const candidates: string[] = [labels.join('.')];
+  if (labels.length > 8) labels = labels.slice(-7);
+  for (let i = 1; i < labels.length - 1; i++) candidates.push(labels.slice(i).join('.'));
+  const unique = [...new Set(candidates)].slice(0, 8);
+  for (const name of unique) {
+    const r = await resolveTxt(resolver, `_dmarc.${name}`);
+    if (r.status === 'ERROR' || r.status === 'SERVFAIL') {
+      return { status: 'error', records: [], error: r.error ?? r.status };
+    }
+    const recs = r.records.filter(isDmarcRecord);
+    if (recs.length > 1) return { status: 'multiple', records: recs, foundAt: name };
+    if (recs.length === 1) return { status: 'found', records: recs, foundAt: name };
+  }
+  return { status: 'missing', records: [] };
+}
+
+export async function checkRuaAuthorization(policyDomain: string, uri: string, resolver: Resolver): Promise<RuaCheck> {
+  const address = uri.replace(/^mailto:/i, '');
+  const destDomain = address.split('@')[1]?.toLowerCase() ?? '';
+  const external = !!destDomain && orgDomain(destDomain) !== orgDomain(policyDomain);
+  if (!external || !uri.toLowerCase().startsWith('mailto:')) return { uri, address, external, authorized: null };
+  const r = await resolveTxt(resolver, `${policyDomain}._report._dmarc.${destDomain}`);
+  if (r.status === 'ERROR' || r.status === 'SERVFAIL') return { uri, address, external, authorized: null };
+  return { uri, address, external, authorized: r.records.some(isDmarcRecord) };
+}
+
+export async function analyzeDmarc(domain: string, resolver: Resolver): Promise<DmarcAnalysis> {
+  const base: DmarcAnalysis = { domain, status: 'ok', inherited: false, policy: null, effectivePolicy: null, testing: false, ruaChecks: [], errors: [], warnings: [] };
+  const found = await findDmarcRecord(domain, resolver);
+  if (found.status === 'error') return { ...base, status: 'error', errors: [`DNS lookup failed: ${found.error}`] };
+  if (found.status === 'missing') {
+    return {
+      ...base,
+      status: 'missing',
+      errors: ['No DMARC record. Anyone can send email pretending to be this domain, and Gmail, Yahoo and Outlook may reject or junk your bulk mail.'],
+    };
+  }
+  base.record = found.records[0]!;
+  base.foundAt = found.foundAt;
+  base.inherited = found.foundAt !== domain.toLowerCase();
+  if (found.status === 'multiple') {
+    base.status = 'multiple';
+    base.errors.push(`Found ${found.records.length} DMARC records at _dmarc.${found.foundAt}. Receivers ignore DMARC entirely when there is more than one.`);
+  }
+  const parsed = parseDmarc(base.record);
+  base.parsed = parsed;
+  base.errors.push(...parsed.errors);
+  base.warnings.push(...parsed.warnings);
+  const rec = parsed.record;
+  const p = rec.p ?? (rec.rua.length ? 'none' : undefined);
+  base.policy = (base.inherited ? (rec.sp ?? p) : p) ?? null;
+  base.testing = rec.t === 'y';
+  base.effectivePolicy = base.policy ? (base.testing ? stepDown(base.policy) : base.policy) : null;
+
+  if (base.policy === 'none') {
+    base.warnings.push('Policy is p=none (monitoring only): spoofed mail is still delivered. Move to quarantine, then reject, once reports look clean.');
+  }
+  if (base.testing && base.policy !== 'none') {
+    base.warnings.push(`t=y (test mode) is set: receivers apply "${base.effectivePolicy}" instead of "${base.policy}".`);
+  }
+  if (rec.pct !== undefined && rec.pct < 100) {
+    base.warnings.push(`pct=${rec.pct}: older receivers apply the policy to only ${rec.pct}% of failing mail.`);
+  }
+  if (rec.rua.length === 0) {
+    base.warnings.push('No rua address, so you receive no aggregate reports and cannot see who sends as your domain.');
+  }
+  if (rec.ruf.length) {
+    base.warnings.push('ruf (failure reports) may contain personal data; few receivers send them. Keep only if you need them.');
+  }
+  base.ruaChecks = await Promise.all(rec.rua.map((u) => checkRuaAuthorization(found.foundAt!, u, resolver)));
+  for (const c of base.ruaChecks) {
+    if (c.authorized === false) {
+      base.errors.push(
+        `Reports to ${c.address} will be dropped: ${c.address.split('@')[1]} has not published "${found.foundAt}._report._dmarc.${c.address.split('@')[1]}" authorising them.`,
+      );
+    }
+  }
+  if (base.status === 'ok' && base.errors.length) base.status = 'invalid';
+  return base;
+}
+
+export interface DmarcBuildOptions {
+  p: DmarcPolicy;
+  sp?: DmarcPolicy;
+  np?: DmarcPolicy;
+  adkim?: Alignment;
+  aspf?: Alignment;
+  rua?: string[];
+  ruf?: string[];
+  fo?: string;
+  t?: boolean;
+  /** Also emit pct=<n> for receivers that still implement RFC 7489. Only used when t is true. */
+  legacyPct?: number;
+  psd?: 'y' | 'n';
+}
+
+function mailto(a: string): string {
+  return a.toLowerCase().startsWith('mailto:') ? a : `mailto:${a}`;
+}
+
+export function buildDmarc(o: DmarcBuildOptions): string {
+  const parts = ['v=DMARC1', `p=${o.p}`];
+  if (o.sp && o.sp !== o.p) parts.push(`sp=${o.sp}`);
+  if (o.np) parts.push(`np=${o.np}`);
+  if (o.psd) parts.push(`psd=${o.psd}`);
+  if (o.t) {
+    parts.push('t=y');
+    if (o.legacyPct !== undefined && o.legacyPct < 100) parts.push(`pct=${o.legacyPct}`);
+  }
+  if (o.adkim === 's') parts.push('adkim=s');
+  if (o.aspf === 's') parts.push('aspf=s');
+  if (o.rua?.length) parts.push(`rua=${o.rua.map(mailto).join(',')}`);
+  if (o.ruf?.length) {
+    parts.push(`ruf=${o.ruf.map(mailto).join(',')}`);
+    if (o.fo) parts.push(`fo=${o.fo}`);
+  }
+  return parts.join('; ');
+}

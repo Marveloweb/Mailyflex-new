@@ -1,0 +1,13 @@
+{
+  "imports": {
+    "@mailyflex/core": "./_shared/core/index.ts",
+    "fast-xml-parser": "npm:fast-xml-parser@5.12.0",
+    "fflate": "npm:fflate@0.8.3",
+    "@supabase/supabase-js": "npm:@supabase/supabase-js@2.119.0"
+  },
+  "compilerOptions": {
+    "strict": true,
+    "lib": ["deno.ns", "deno.window", "dom"]
+  },
+  "lint": { "rules": { "exclude": ["no-explicit-any"] } }
+}

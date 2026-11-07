@@ -1,0 +1,14 @@
+# Cloudflare Worker serving hosted MTA-STS policies for customer domains.
+# Set up once (see README "Hosted DNS"):
+#   1. Zone dns.mailyflex.com on Cloudflare; enable Cloudflare for SaaS (SSL/TLS → Custom Hostnames).
+#   2. Fallback origin: sts.dns.mailyflex.com (proxied AAAA 100:: is fine).
+#   3. Route */* on the zone to this Worker (custom hostnames hit it too).
+#   4. `npx wrangler secret put SUPABASE_ANON_KEY`
+name = "mailyflex-edge"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+
+[vars]
+SUPABASE_URL = "https://YOUR-PROJECT-REF.supabase.co"
+
+# routes = [{ pattern = "*/*", zone_name = "dns.mailyflex.com" }]
