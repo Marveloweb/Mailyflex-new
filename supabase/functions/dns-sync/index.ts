@@ -16,7 +16,7 @@ Deno.serve(
     const env = hostedEnv();
 
     if (body.all) {
-      if (!isCron(req)) throw new HttpError(401, 'Cron secret required');
+      if (!(await isCron(req))) throw new HttpError(401, 'Cron secret required');
       if (!configured()) return json(req, { skipped: 'hosted DNS not configured' });
       const { data } = await db
         .from('domains')

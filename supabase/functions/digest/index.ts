@@ -14,7 +14,7 @@ function senderName(sender: string): string {
 
 Deno.serve(
   handler(async (req) => {
-    if (!isCron(req)) throw new HttpError(401, 'Cron secret required');
+    if (!(await isCron(req))) throw new HttpError(401, 'Cron secret required');
     const { mode = 'daily' } = await readJson<{ mode?: 'daily' | 'weekly' }>(req);
     const db = serviceClient();
     const { data: domains } = await db.from('domains').select('*').not('verified_at', 'is', null).limit(2000);

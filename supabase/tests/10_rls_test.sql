@@ -170,6 +170,18 @@ update public.alerts set read_at = now();
 reset role;
 select t.eq((select count(*) from public.alerts where read_at is not null)::int, 3, 'viewer can mark alerts read');
 
+-- ---------- domain_org only answers for members; cron secret check is service-only
+set role authenticated;
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000b', false);
+select t.eq(public.domain_org((select v::uuid from t.ctx where k = 'dom_a')), null::uuid, 'non-member gets no org id');
+select t.expect_error($$select public.check_cron_secret('x')$$, 'permission denied');
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000d', false);
+select t.eq(public.domain_org((select v::uuid from t.ctx where k = 'dom_a')), (select v::uuid from t.ctx where k = 'org_a'), 'member gets org id');
+reset role;
+set role service_role;
+select t.eq(public.check_cron_secret('anything'), false, 'no vault -> cron check fails closed');
+reset role;
+
 -- ---------- Org deletion cascades despite owner guard
 set role authenticated;
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000b', false);

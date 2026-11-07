@@ -11,7 +11,7 @@ Deno.serve(
     const body = await readJson<{ domain_id?: string; all?: boolean }>(req);
     const db = serviceClient();
     if (body.all) {
-      if (!isCron(req)) throw new HttpError(401, 'Cron secret required');
+      if (!(await isCron(req))) throw new HttpError(401, 'Cron secret required');
       const started = Date.now();
       const { data: domains, error } = await db
         .from('domains')

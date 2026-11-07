@@ -39,10 +39,18 @@ export function safeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-export function isCron(req: Request): boolean {
-  const secret = optionalEnv('CRON_SECRET');
+/**
+ * True when the request carries the scheduler's shared secret. Uses the CRON_SECRET env var when set
+ * (local development); otherwise checks it against the Vault secret "cron_secret" in the database,
+ * which is the same value pg_cron sends.
+ */
+export async function isCron(req: Request): Promise<boolean> {
   const given = req.headers.get('x-cron-secret');
-  return !!secret && !!given && safeEqual(secret, given);
+  if (!given || given.length > 256) return false;
+  const secret = optionalEnv('CRON_SECRET');
+  if (secret) return safeEqual(secret, given);
+  const { data, error } = await serviceClient().rpc('check_cron_secret', { p_secret: given });
+  return !error && data === true;
 }
 
 /** Domain row, visible to the caller only if RLS allows; enforces a minimum role. */

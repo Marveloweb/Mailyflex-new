@@ -33,7 +33,7 @@ begin
   if exists (select 1 from pg_available_extensions where name = 'pg_cron')
      and exists (select 1 from pg_available_extensions where name = 'pg_net') then
     create extension if not exists pg_cron;
-    create extension if not exists pg_net;
+    create extension if not exists pg_net with schema extensions;
     -- Rescan every domain every 6 hours (DNS changes, blocklists, score).
     perform cron.schedule('mailyflex-scan-all', '17 */6 * * *', $cmd$ select public.invoke_edge_function('domain-scan', '{"all": true}') $cmd$);
     -- Re-resolve hosted SPF includes and republish flattened records.

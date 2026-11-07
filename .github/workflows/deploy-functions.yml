@@ -1,0 +1,56 @@
+name: Deploy edge functions
+
+# Deploys every function in supabase/functions to the Maily Flex Supabase project.
+# Needs the repository secret SUPABASE_ACCESS_TOKEN (Supabase → Account → Access Tokens).
+# The project ref can be overridden with the repository variable SUPABASE_PROJECT_REF.
+on:
+  push:
+    # build/v1 is listed so the first deploy can run before PR #1 is merged; remove it after merging.
+    branches: [main, build/v1]
+    paths:
+      - 'supabase/functions/**'
+      - 'supabase/config.toml'
+      - '.github/workflows/deploy-functions.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-functions
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF || 'jxwjmisezpkbzbjjbjde' }}
+    steps:
+      - name: Check for access token
+        id: token
+        run: |
+          if [ -z "$SUPABASE_ACCESS_TOKEN" ]; then
+            echo "::warning title=Not deployed::Add the SUPABASE_ACCESS_TOKEN repository secret to deploy edge functions."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.token.outputs.present == 'true'
+      - uses: supabase/setup-cli@v1
+        if: steps.token.outputs.present == 'true'
+        with:
+          version: latest
+      - name: Deploy
+        if: steps.token.outputs.present == 'true'
+        run: supabase functions deploy --project-ref "$PROJECT_REF" --use-api
+      - name: Smoke test
+        if: steps.token.outputs.present == 'true'
+        run: |
+          # Public function: should fetch Gmail's real MTA-STS policy.
+          curl -sf -m 60 -X POST "https://$PROJECT_REF.supabase.co/functions/v1/mta-sts-fetch" \
+            -H 'content-type: application/json' -d '{"domain":"gmail.com"}' | grep -q '"ok":true'
+          # Cron-only function must refuse calls without the secret.
+          test "$(curl -s -o /dev/null -w '%{http_code}' -m 60 -X POST "https://$PROJECT_REF.supabase.co/functions/v1/digest" -d '{}')" = "401"
+          echo "Functions are live."

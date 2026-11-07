@@ -72,15 +72,15 @@ End-to-end: with the local stack running, the web app built against it and serve
 
 ### 1. Supabase
 
-1. Create a project, then `supabase link --project-ref <ref>` and `supabase db push`.
-2. Store two Vault secrets so pg_cron can call the functions (SQL editor):
+1. Create a project and apply the migrations: `supabase link --project-ref <ref>` and `supabase db push`.
+2. Store two Vault secrets so pg_cron can call the functions (SQL editor). The cron secret is generated in the database; the functions check calls against it, so it never needs copying anywhere:
    ```sql
    select vault.create_secret('https://<ref>.supabase.co', 'project_url');
-   select vault.create_secret('<long random string>', 'cron_secret');
+   select vault.create_secret(encode(extensions.gen_random_bytes(32), 'hex'), 'cron_secret');
    ```
-3. Set function secrets (same `CRON_SECRET` value as the Vault secret): `supabase secrets set --env-file supabase/functions/.env`.
-4. Deploy functions: `supabase functions deploy`. All use `verify_jwt = false` in `supabase/config.toml` because each checks its own auth (user JWT, cron secret or webhook signature).
-5. Auth → URL configuration: site URL `https://app.mailyflex.com`, and add it to redirect URLs. Use Resend as the custom SMTP provider so sign-up emails come from your domain.
+3. Set function secrets (Dashboard → Edge Functions → Secrets, or `supabase secrets set --env-file supabase/functions/.env`): `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ZONE_ID`. The others have working defaults (see `supabase/functions/.env.example`).
+4. Deploy functions: add a `SUPABASE_ACCESS_TOKEN` repository secret on GitHub and push (workflow `Deploy edge functions`), or run `supabase functions deploy --use-api` yourself. All use `verify_jwt = false` in `supabase/config.toml` because each checks its own auth (user JWT, cron secret or webhook signature).
+5. Auth → URL configuration: site URL `https://app.mailyflex.com`, and add `https://app.mailyflex.com/**` to redirect URLs. Use Resend as the custom SMTP provider so sign-up emails come from your domain.
 
 ### 2. Resend
 
