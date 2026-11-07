@@ -79,7 +79,7 @@ End-to-end: with the local stack running, the web app built against it and serve
    select vault.create_secret(encode(extensions.gen_random_bytes(32), 'hex'), 'cron_secret');
    ```
 3. Set function secrets (Dashboard → Edge Functions → Secrets, or `supabase secrets set --env-file supabase/functions/.env`): `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ZONE_ID`. The others have working defaults (see `supabase/functions/.env.example`).
-4. Deploy functions: add a `SUPABASE_ACCESS_TOKEN` repository secret on GitHub and push (workflow `Deploy edge functions`), or run `supabase functions deploy --use-api` yourself. All use `verify_jwt = false` in `supabase/config.toml` because each checks its own auth (user JWT, cron secret or webhook signature).
+4. Deploy: connect the Supabase GitHub integration (Project Settings → Integrations → GitHub) to this repo with production branch `main` and **Deploy to production** on. Every push to `main` then applies new migrations and deploys the functions declared in `supabase/config.toml`; no access token is stored in GitHub. (Manual alternative: `supabase functions deploy --use-api` from your own machine.) All functions use `verify_jwt = false` because each checks its own auth (user JWT, cron secret or webhook signature).
 5. Auth → URL configuration: site URL `https://app.mailyflex.com`, and add `https://app.mailyflex.com/**` to redirect URLs. Use Resend as the custom SMTP provider so sign-up emails come from your domain.
 
 ### 2. Resend

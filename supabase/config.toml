@@ -1,4 +1,6 @@
 # Supabase CLI config for Maily Flex. Functions do their own auth (user JWT, cron secret, or webhook signature).
+# Production deploys come from the Supabase GitHub integration ("Deploy to production" on main): it applies new
+# migrations and deploys every function declared below. A function missing from this file is NOT deployed.
 project_id = "mailyflex"
 
 [api]
