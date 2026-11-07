@@ -335,7 +335,7 @@ export async function analyzeSpf(domain: string, resolver: Resolver, opts: Analy
 }
 
 export interface FlattenOptions {
-  /** Host of the first record, e.g. "example.com._s.dns.mailyflex.com". Next ones get ".1", ".2" inserted after the first label. */
+  /** Host of the first record, e.g. "<token>._s.dns.mailyflex.com". Next ones get "-1", "-2" appended to the first label. */
   baseHost: string;
   /** Terms that must be kept verbatim (macros, exists). */
   keep?: string[];
@@ -350,7 +350,7 @@ export interface FlatRecord {
 export function chunkHost(baseHost: string, index: number): string {
   if (index === 0) return baseHost;
   const [first, ...rest] = baseHost.split('.');
-  return [`${first}`, String(index), ...rest].join('.');
+  return [`${first}-${index}`, ...rest].join('.');
 }
 
 /**

@@ -10,3 +10,4 @@ export * from './report.ts';
 export * from './generators.ts';
 export * from './enforcement.ts';
 export * from './health.ts';
+export * from './hosted.ts';

@@ -1,0 +1,37 @@
+# Supabase CLI config for Maily Flex. Functions do their own auth (user JWT, cron secret, or webhook signature).
+project_id = "mailyflex"
+
+[api]
+schemas = ["public"]
+
+[auth]
+site_url = "http://localhost:5173"
+additional_redirect_urls = ["https://app.mailyflex.com", "http://localhost:5173"]
+
+[functions.mta-sts-fetch]
+verify_jwt = false
+import_map = "./functions/deno.json"
+
+[functions.domain-verify]
+verify_jwt = false
+import_map = "./functions/deno.json"
+
+[functions.domain-scan]
+verify_jwt = false
+import_map = "./functions/deno.json"
+
+[functions.dmarc-inbound]
+verify_jwt = false
+import_map = "./functions/deno.json"
+
+[functions.dns-sync]
+verify_jwt = false
+import_map = "./functions/deno.json"
+
+[functions.invite]
+verify_jwt = false
+import_map = "./functions/deno.json"
+
+[functions.digest]
+verify_jwt = false
+import_map = "./functions/deno.json"

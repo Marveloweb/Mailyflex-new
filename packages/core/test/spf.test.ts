@@ -103,12 +103,12 @@ describe('flattening', () => {
 
   it('chains records under the byte limit', () => {
     const ips = Array.from({ length: 60 }, (_, i) => `198.51.${i}.7`);
-    const recs = flattenSpf(ips, [], { baseHost: 'example.com._s.dns.mailyflex.com' });
+    const recs = flattenSpf(ips, [], { baseHost: 'abc123._s.dns.mailyflex.com' });
     expect(recs.length).toBeGreaterThan(1);
     for (const r of recs) expect(r.value.length).toBeLessThanOrEqual(450);
-    expect(recs[0]!.host).toBe('example.com._s.dns.mailyflex.com');
-    expect(recs[1]!.host).toBe('example.1.com._s.dns.mailyflex.com'.replace('example.1.com', 'example.1.com'));
-    expect(recs[0]!.value).toContain(`include:${chunkHost('example.com._s.dns.mailyflex.com', 1)}`);
+    expect(recs[0]!.host).toBe('abc123._s.dns.mailyflex.com');
+    expect(recs[1]!.host).toBe('abc123-1._s.dns.mailyflex.com');
+    expect(recs[0]!.value).toContain(`include:${chunkHost('abc123._s.dns.mailyflex.com', 1)}`);
     expect(recs.at(-1)!.value).not.toContain('include:');
     const all = recs.flatMap((r) => r.value.split(' ').filter((t) => t.startsWith('ip4:')));
     expect(all).toHaveLength(60);
